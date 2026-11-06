@@ -1,0 +1,83 @@
+{
+  "about": "Redaction (docs/openapi.yaml, RedactRule): each case's rules applied to its input give its output, in the service and in every client, and applied again give the same. hash is the service's only: not here.",
+  "cases": [
+    {
+      "name": "drop, at a path and under a wildcard",
+      "rules": [{ "path": "/telemetry/session/token", "strategy": "drop" }, { "path": "/telemetry/peers/*/ip", "strategy": "drop" }],
+      "input": { "telemetry": { "session": { "token": "abc", "id": 7 }, "peers": [{ "ip": "1.2.3.4", "n": 1 }, { "ip": "5.6.7.8" }] } },
+      "output": { "telemetry": { "session": { "id": 7 }, "peers": [{ "n": 1 }, {}] } }
+    },
+    {
+      "name": "drop an array's element by index: null in its place (under *, it's gone)",
+      "rules": [{ "path": "/telemetry/list/1", "strategy": "drop" }],
+      "input": { "telemetry": { "list": ["a", "b", "c"] } },
+      "output": { "telemetry": { "list": ["a", null, "c"] } }
+    },
+    {
+      "name": "mask: text, a number, a short one, one masked already",
+      "rules": [{ "path": "/telemetry/*", "strategy": "mask", "keep": 4 }],
+      "input": { "telemetry": { "card": "1234567812345678", "pin": 98765, "short": "12", "done": "••••5678" } },
+      "output": { "telemetry": { "card": "••••5678", "pin": "••••8765", "short": "••••12", "done": "••••5678" } }
+    },
+    {
+      "name": "mask keeping nothing; objects left as they are",
+      "rules": [{ "path": "/telemetry/*", "strategy": "mask" }],
+      "input": { "telemetry": { "name": "Ola", "obj": { "a": 1 } } },
+      "output": { "telemetry": { "name": "••••", "obj": { "a": 1 } } }
+    },
+    {
+      "name": "truncate, by characters",
+      "rules": [{ "path": "/telemetry/bio", "strategy": "truncate", "max": 3 }],
+      "input": { "telemetry": { "bio": "żółwik" } },
+      "output": { "telemetry": { "bio": "żół" } }
+    },
+    {
+      "name": "round to a step",
+      "rules": [{ "path": "/telemetry/a", "strategy": "round", "step": 0.5 }, { "path": "/telemetry/b", "strategy": "round", "step": 100 }, { "path": "/telemetry/c", "strategy": "round", "step": 0.01 }],
+      "input": { "telemetry": { "a": 1.26, "b": 1249, "c": 3.14159 } },
+      "output": { "telemetry": { "a": 1.5, "b": 1200, "c": 3.14 } }
+    },
+    {
+      "name": "coarsen a geo field and a number",
+      "rules": [{ "path": "/context/at", "strategy": "coarsen", "digits": 1 }, { "path": "/telemetry/lat", "strategy": "coarsen", "digits": 2 }],
+      "input": { "context": { "at": { "lat": 51.9438, "lon": 19.7122 } }, "telemetry": { "lat": 51.9438 } },
+      "output": { "context": { "at": { "lat": 51.9, "lon": 19.7 } }, "telemetry": { "lat": 51.94 } }
+    },
+    {
+      "name": "regex in every text under a path, and in the note",
+      "rules": [{ "path": "/telemetry", "strategy": "regex", "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "replace": "[email]" }, { "path": "/note", "strategy": "regex", "pattern": "\\b\\d{9}\\b" }],
+      "input": { "note": "call me 600700800, or 123", "telemetry": { "log": ["mail ola@example.pl", "ok"], "deep": { "x": "to a.b@c.io" }, "n": 5 } },
+      "output": { "note": "call me [redacted], or 123", "telemetry": { "log": ["mail [email]", "ok"], "deep": { "x": "to [email]" }, "n": 5 } }
+    },
+    {
+      "name": "a context field dropped: the context goes when it's empty",
+      "rules": [{ "path": "/context/street", "strategy": "drop" }],
+      "input": { "context": { "street": "Długa 1" } },
+      "output": {}
+    },
+    {
+      "name": "the whole telemetry dropped",
+      "rules": [{ "path": "/telemetry", "strategy": "drop" }],
+      "input": { "note": "x", "telemetry": { "a": 1 } },
+      "output": { "note": "x" }
+    },
+    {
+      "name": "keys with / and ~ (JSON pointer escapes); a path that isn't there",
+      "rules": [{ "path": "/telemetry/a~1b", "strategy": "drop" }, { "path": "/telemetry/c~0d", "strategy": "drop" }, { "path": "/telemetry/nope/x", "strategy": "drop" }],
+      "input": { "telemetry": { "a/b": 1, "c~d": 2, "e": 3 } },
+      "output": { "telemetry": { "e": 3 } }
+    },
+    {
+      "name": "skipped: hash (the service's), a client's own, one unknown",
+      "rules": [{ "path": "/telemetry/a", "strategy": "hash", "server_only": true }, { "path": "/telemetry/b", "strategy": "client:nonesuch" }, { "path": "/telemetry/c", "strategy": "nonesuch" }],
+      "input": { "telemetry": { "a": "x", "b": "y", "c": "z" } },
+      "output": { "telemetry": { "a": "x", "b": "y", "c": "z" } }
+    },
+    {
+      "name": "in order: truncated, then masked",
+      "rules": [{ "path": "/telemetry/s", "strategy": "truncate", "max": 6 }, { "path": "/telemetry/s", "strategy": "mask", "keep": 2 }],
+      "input": { "telemetry": { "s": "abcdefghij" } },
+      "output": { "telemetry": { "s": "••••ef" } }
+    }
+  ]
+}

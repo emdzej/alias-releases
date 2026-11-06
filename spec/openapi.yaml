@@ -1,0 +1,730 @@
+openapi: 3.1.0
+info:
+  title: ALIAS (alias-support), the user API
+  version: "1"
+  description: |
+    What a product's client calls: an anonymous identity the service makes, reports and their answers
+    (live), a contact only if the user gives one, moving the identity to another device, and the user's
+    own data. Every request carries the product's key (`X-Alias-Key`); all but three carry the user too
+    (`X-Alias-User`, `X-Alias-Secret`, as `POST /api/v1/identity` or a transfer gave them).
+
+    Errors are `{"error": "…"}` with a status: 400 (what's wrong, in words), 401 (no such key, id or
+    secret), 403 (blocked, or a browser origin the product doesn't allow), 404, 409, 413, 429 (a limit:
+    try later), 5xx. The clients follow this description: the same calls and names in each.
+  license:
+    name: All rights reserved
+servers:
+  - url: https://alias.help
+security:
+  - key: []
+    user: []
+    secret: []
+components:
+  securitySchemes:
+    key: { type: apiKey, in: header, name: X-Alias-Key, description: "The product's API key: which product this is." }
+    user: { type: apiKey, in: header, name: X-Alias-User, description: "The user's id (a UUID v7 the service made)." }
+    secret: { type: apiKey, in: header, name: X-Alias-Secret, description: "This device's secret: 64 hex characters." }
+  responses:
+    Error:
+      description: Refused, and why.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [key_revoked], description: "What kind of refusal, when it's one a client acts on. key_revoked: this build's key was revoked." }
+        reason: { type: string, maxLength: 300, description: "key_revoked: support's words for the user (\"This version is no longer supported\"), when they gave some. Show it as it is." }
+    RemoteRequest:
+      type: object
+      required: [id, ticket, channel, state, asked_by, asked_at, deadline]
+      properties:
+        id: { type: string }
+        ticket: { type: integer, format: int64 }
+        channel: { type: string, enum: [shell, screen], description: "shell: SSH to the device's sshd (its own sign-in still applies). screen: VNC; not encrypted end to end, the relay's operator could see it." }
+        state: { type: string, enum: [asked, accepted, open, ended, declined, expired] }
+        asked_by: { type: string, description: The support person's name. }
+        asked_at: { type: string, format: date-time }
+        deadline: { type: string, format: date-time, description: "asked: answer by; accepted, open: the session's end." }
+        end_reason: { type: string, description: "left, ended_by_support, ended_by_user, time_up, nobody_came, relay, not answered." }
+        relay:
+          type: object
+          description: The device's side, once accepted (answerRemote's answer only).
+          required: [url, token]
+          properties: { url: { type: string }, token: { type: string } }
+    Identity:
+      type: object
+      required: [id, secret]
+      properties:
+        id: { type: string, description: "A UUID v7.", example: "01a1a2b3-9cdf-71e1-b2d5-91d78e28a35a" }
+        secret: { type: string, pattern: "^[0-9a-f]{64}$", description: "Shown this once: keep it (only its hash is kept here)." }
+    Field:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        type: { type: string, enum: [text, number, bool, geo, link, json] }
+        template: { type: string, description: "A link's: {field} replaced by that field's value." }
+    Product:
+      type: object
+      required: [id, name, contact, contact_kinds, fields, keeping]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        privacy_url: { type: string }
+        branding:
+          type: object
+          properties: { logo: { type: string }, colour: { type: string }, accent: { type: string } }
+        fields: { type: array, items: { $ref: "#/components/schemas/Field" }, description: "What a report's context may carry; the rest is dropped." }
+        contact: { type: string, enum: ["off", optional] }
+        contact_consent: { oneOf: [{ $ref: "#/components/schemas/ConsentText" }, { type: "null" }], description: "With contact optional: the text to show by the contact field." }
+        contact_kinds: { type: array, items: { type: string, enum: [email, other] } }
+        keeping:
+          type: object
+          properties: { done_days: { type: integer }, unseen_days: { type: integer } }
+        redact:
+          type: array
+          items: { $ref: "#/components/schemas/RedactRule" }
+          description: |
+            Applied, in order, to what the user sends, before it leaves the device; the service applies
+            them again as it comes in. Skip a rule that's `server_only` (hash) or a strategy the client
+            doesn't know; a `client:<name>` strategy is the app's own.
+        removable:
+          type: array
+          items: { type: string }
+          description: "Paths (as a rule's) the user may take out before sending: show the telemetry, offer these."
+        attachments: { $ref: "#/components/schemas/AttachmentLimits" }
+        formats: { type: array, items: { $ref: "#/components/schemas/Format" } }
+        telemetry_max: { type: integer, description: "The telemetry's bytes at most, as JSON." }
+        conversations:
+          type: object
+          description: How the product's tickets run.
+          properties:
+            mode: { $ref: "#/components/schemas/Mode" }
+            switch: { type: string, enum: [none, desk, user, both], description: "Who may take a ticket live: support (desk), the user asking (user), or both." }
+            idle_minutes: { type: integer, description: "A live ticket quiet this long goes back to tickets." }
+        live:
+          type: object
+          description: Live now, as the client should offer it.
+          properties:
+            mode: { $ref: "#/components/schemas/Mode" }
+            user_may_ask: { type: boolean, description: "Offer \"Talk live\" on a ticket (requestLive)." }
+            available: { type: boolean, description: "Someone at the desk is taking live conversations now." }
+    RedactRule:
+      type: object
+      required: [path, strategy, server_only]
+      properties:
+        path: { type: string, description: "`/telemetry/…` (a JSON pointer, `*` for every key or element), `/context/<field>`, or `/note` (a note and a reply's text).", example: /telemetry/peers/*/ip }
+        strategy: { type: string, description: "drop, mask, truncate, round, coarsen, regex, hash (server only), or `client:<name>`." }
+        server_only: { type: boolean }
+        keep: { type: integer, description: "mask: ••••, then the last `keep` characters (leading • aren't counted)." }
+        max: { type: integer, description: "truncate: the characters kept." }
+        step: { type: number, description: "round: to the nearest multiple." }
+        digits: { type: integer, description: "coarsen: a number, or a geo value's lat and lon, to these decimals." }
+        pattern: { type: string, description: "regex: RE2, in every text under the path." }
+        replace: { type: string, description: "regex: what a match becomes, literally ([redacted])." }
+    AttachmentLimits:
+      type: object
+      required: [max, bytes, types]
+      properties:
+        max: { type: integer, description: "Files a report or a reply may carry." }
+        bytes: { type: integer, description: "Their bytes together." }
+        types: { type: array, items: { type: string, enum: [image/jpeg, image/png, image/webp, text/plain, application/json] }, description: "Told from the bytes, not the name or the part's type." }
+    Attachment:
+      type: object
+      required: [id, name, type, size, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string, description: "Letters, digits, . - _; unique in its report or reply: what ![](attachment:name) names." }
+        type: { type: string }
+        size: { type: integer }
+        created_at: { type: string, format: date-time }
+    Format:
+      type: string
+      enum: [text/plain, text/markdown]
+      description: |
+        text/markdown: CommonMark with GFM's tables, strikethrough and autolinks; no raw HTML, and no
+        images but the report's own attachments (`![](attachment:name)`). Render it, or show it as it is.
+    Me:
+      type: object
+      required: [id, created_at, devices]
+      properties:
+        id: { type: string }
+        created_at: { type: string, format: date-time }
+        devices: { type: integer, description: "Devices holding a secret for this id." }
+        contact: { oneOf: [{ $ref: "#/components/schemas/Contact" }, { type: "null" }] }
+    Contact:
+      type: object
+      required: [kind, value, given_at]
+      properties:
+        kind: { type: string, enum: [email, other] }
+        value: { type: string }
+        given_at: { type: string, format: date-time }
+        consent: { $ref: "#/components/schemas/Consent" }
+    ConsentText:
+      type: object
+      required: [text, version]
+      properties:
+        text: { type: string, description: "Show it, whole, where the user gives a contact; send nothing until they agree to it." }
+        version: { type: string, description: "The text's hash: send it back with the contact, as proof of which text was shown." }
+    Consent:
+      type: object
+      required: [id, purpose, version, text, kind, given_at]
+      description: What the user agreed to in giving a contact, as recorded. Kept, ended or not, until the identity goes.
+      properties:
+        id: { type: integer, format: int64 }
+        purpose: { type: string, enum: [contact] }
+        version: { type: string }
+        text: { type: string, description: "The text as it was when they agreed." }
+        kind: { type: string, enum: [email, other] }
+        app_version: { type: string }
+        given_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        ended: { type: string, enum: [withdrawn, replaced] }
+    ContactState:
+      type: object
+      required: [contact]
+      properties:
+        contact: { oneOf: [{ $ref: "#/components/schemas/Contact" }, { type: "null" }] }
+        policy: { type: string, enum: ["off", optional] }
+        kinds: { type: array, items: { type: string } }
+        consent: { oneOf: [{ $ref: "#/components/schemas/ConsentText" }, { type: "null" }], description: "The text to show now (as the product's contact_consent)." }
+    Report:
+      type: object
+      required: [note]
+      properties:
+        note: { type: string, minLength: 1, maxLength: 4000 }
+        format: { $ref: "#/components/schemas/Format" }
+        screenshot: { type: string, contentEncoding: base64, description: "A JPEG, up to 3 MB (JSON only: as multipart, send it as an attachment)." }
+        context: { type: object, additionalProperties: true, description: "The product's fields (GET /api/v1/product)." }
+        app_version: { type: string, maxLength: 40 }
+        telemetry: { type: object, additionalProperties: true, description: "Free JSON up to the product's size, matching its schema if it has one (else 400, saying where)." }
+    Reply:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 4000 }
+        format: { $ref: "#/components/schemas/Format" }
+        screenshot: { type: string, contentEncoding: base64 }
+        context: { type: object, additionalProperties: true }
+        telemetry: { type: object, additionalProperties: true }
+    Entry:
+      type: object
+      required: [id, author, kind, body, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        author: { type: string, enum: [user, support] }
+        name: { type: string, description: "A support person's name." }
+        agent: { type: boolean, description: "Support's, but written by an agent (a service account: an AI agent, a script), not a person. Show the user it was." }
+        kind: { type: string, enum: [comment, status, mode], description: "status: body is the new status; mode: the ticket's new mode." }
+        body: { type: string }
+        format: { $ref: "#/components/schemas/Format" }
+        created_at: { type: string, format: date-time }
+        context: { type: object, additionalProperties: true }
+        attachments: { type: array, items: { $ref: "#/components/schemas/Attachment" } }
+        has_screenshot: { type: boolean, description: "An image among the attachments." }
+    Status: { type: string, enum: [open, in_progress, waiting, resolved, closed] }
+    Mode: { type: string, enum: [tickets, live], description: "tickets: request and response; live: a conversation, as it happens." }
+    Ticket:
+      type: object
+      required: [id, product, status, note, format, app_version, attachments, has_screenshot, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        product: { type: string }
+        status: { $ref: "#/components/schemas/Status" }
+        note: { type: string }
+        format: { $ref: "#/components/schemas/Format" }
+        context: { type: object, additionalProperties: true }
+        app_version: { type: string }
+        attachments: { type: array, items: { $ref: "#/components/schemas/Attachment" }, description: "The report's own (a reply's are its entry's)." }
+        has_screenshot: { type: boolean, description: "An image among the attachments." }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        support_at: { type: string, format: date-time, description: "Support's last answer or status change." }
+        mode: { $ref: "#/components/schemas/Mode" }
+        live_requested_at: { type: string, format: date-time, description: "The user asked for live and nobody was there yet." }
+        user_read_at: { type: string, format: date-time, description: "The user read the thread up to then." }
+        support_read_at: { type: string, format: date-time, description: "Support read the thread up to then." }
+        thread: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+    Update:
+      type: object
+      required: [kind, ticket, status, at]
+      properties:
+        kind: { type: string, enum: [answer, mode, typing, read, remote], description: "Polling (updates) has answers only; the stream has all five. remote: a remote assistance request changed (look it up: remoteRequests)." }
+        ticket: { type: integer, format: int64 }
+        status: { $ref: "#/components/schemas/Status" }
+        at: { type: string, format: date-time }
+        mode: { $ref: "#/components/schemas/Mode" }
+        who: { type: string, enum: [support], description: "typing, read: who." }
+        name: { type: string, description: "typing: the support person's name." }
+        remote: { type: string, description: "remote: the request's id." }
+        channel: { type: string, enum: [shell, screen], description: "remote: which." }
+        state: { type: string, description: "remote: what it is now (RemoteRequest's state)." }
+    Transfer:
+      type: object
+      required: [code, expires_at]
+      properties:
+        code: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$", description: "Typed on the other device (any case; O, I, L read as 0, 1, 1)." }
+        expires_at: { type: string, format: date-time }
+    WebhookEvent:
+      description: |
+        What a webhook endpoint receives (Standard Webhooks): signed with the webhook-id, webhook-timestamp
+        and webhook-signature headers. The fields marked "content" are there only if the endpoint has
+        content on, and are redacted by the product's rules.
+      type: object
+      required: [type, timestamp, data]
+      properties:
+        type:
+          type: string
+          enum: [ticket.created, ticket.replied, ticket.answered, ticket.status_changed, ticket.deleted, ticket.live_started, ticket.live_ended, webhook.test]
+        timestamp: { type: string, format: date-time }
+        data:
+          type: object
+          required: [product]
+          properties:
+            product: { type: string }
+            ticket: { $ref: '#/components/schemas/WebhookTicket' }
+            entry: { $ref: '#/components/schemas/WebhookEntry' }
+            webhook: { type: string, description: webhook.test only }
+            by: { type: string, description: "webhook.test only: who sent it" }
+    WebhookTicket:
+      type: object
+      required: [id, status, mode, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        status: { type: string, enum: [open, in_progress, waiting, resolved, closed] }
+        mode: { type: string, enum: [tickets, live] }
+        app_version: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        url: { type: string, format: uri, description: "the ticket on the panel (with the deployment's public_url)" }
+        user: { type: string, description: "content: the user's anonymous id" }
+        note: { type: string, description: content }
+        format: { type: string, enum: [text/plain, text/markdown], description: content }
+        context: { type: object, description: content }
+        telemetry: { type: object, description: content }
+        attachments: { type: array, items: { $ref: '#/components/schemas/WebhookFile' }, description: content }
+    WebhookEntry:
+      description: "What happened (ticket.replied, .answered, .status_changed, .live_started, .live_ended)."
+      type: object
+      required: [id, author, kind, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        author: { type: string, enum: [user, support] }
+        kind: { type: string, enum: [comment, status, mode] }
+        created_at: { type: string, format: date-time }
+        status: { type: string, description: "kind status: the new status" }
+        mode: { type: string, enum: [tickets, live], description: "kind mode: the new mode" }
+        body: { type: string, description: content }
+        format: { type: string, description: content }
+        name: { type: string, description: "content: the support person's name, on an answer" }
+        agent: { type: boolean, description: "by an agent (a service account), not a person" }
+        attachments: { type: array, items: { $ref: '#/components/schemas/WebhookFile' }, description: content }
+    WebhookFile:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string }
+        size: { type: integer }
+paths:
+  /api/v1/product:
+    get:
+      operationId: getProduct
+      summary: The product's public settings (for the client's UI)
+      security: [{ key: [] }]
+      responses:
+        "200": { description: The product, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/identity:
+    post:
+      operationId: newIdentity
+      summary: A new anonymous identity, made by the service (or a new secret for an id support reset)
+      description: |
+        Limited to 20 an hour per address per product, and by a budget per key. If the product asks for
+        proof of work (`identityChallenge` says how many bits), the request carries `X-Alias-Work`:
+        `<challenge>:<nonce>`, where SHA-256 of that whole value begins with that many zero bits. Without
+        it, or with a challenge out of time or used: 428 (ask for another challenge).
+      security: [{ key: [] }]
+      parameters: [{ name: X-Alias-Work, in: header, required: false, schema: { type: string }, description: "`<challenge>:<nonce>`, when the product asks for proof of work." }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, properties: { id: { type: string, description: "An id whose secrets support reset." } } }
+      responses:
+        "201": { description: A new id, content: { application/json: { schema: { $ref: "#/components/schemas/Identity" } } } }
+        "200": { description: The reset id's new secret, content: { application/json: { schema: { $ref: "#/components/schemas/Identity" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/identity/challenge:
+    get:
+      operationId: identityChallenge
+      summary: The proof of work a new identity costs, if any (a challenge good for five minutes, once)
+      description: |
+        `bits` 0: none, post the identity as it is. Otherwise find a nonce such that SHA-256 of
+        `<challenge>:<nonce>` begins with `bits` zero bits (about 2^bits tries), and send that as
+        `X-Alias-Work`. The bits can go up at any time (an attack, a key in quarantine), so a client
+        always asks.
+      security: [{ key: [] }]
+      responses:
+        "200":
+          description: The work asked for
+          content:
+            application/json:
+              schema: { type: object, required: [bits], properties: { bits: { type: integer, minimum: 0, maximum: 22 }, challenge: { type: string }, expires_at: { type: string, format: date-time } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/transfer/claim:
+    post:
+      operationId: claimTransfer
+      summary: This device gets the identity a transfer code names, with a secret of its own
+      description: 10 tries an hour per address per product; a code ends after 5 wrong tries, or 10 minutes.
+      security: [{ key: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } }
+      responses:
+        "200": { description: The identity, content: { application/json: { schema: { $ref: "#/components/schemas/Identity" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/me:
+    get:
+      operationId: me
+      summary: The id and secret are good; the id's devices and contact
+      responses:
+        "200": { description: Yes, content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: eraseMe
+      summary: Erase the id and everything of it (reports, attachments, contact), for good
+      responses:
+        "200": { description: Erased, content: { application/json: { schema: { type: object, properties: { erased: { type: string }, tickets: { type: integer } } } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/me/data:
+    get:
+      operationId: myData
+      summary: A copy of everything kept about the id, as JSON (attachments base64)
+      responses:
+        "200": { description: The copy, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/me/contact:
+    get:
+      operationId: getContact
+      summary: The contact given (null none), and the product's policy
+      responses:
+        "200": { description: The state, content: { application/json: { schema: { $ref: "#/components/schemas/ContactState" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      operationId: setContact
+      summary: Give (or change) a contact, with the user's consent, if the product takes one (else 409)
+      description: |
+        Only after the user agreed to the product's `contact_consent` text, shown whole: `consent.version`
+        is that text's version. Without it 400; with an older text's 409 (show the current one and ask
+        again). The consent is recorded with the text; a new contact ends the one before (replaced).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, value, consent]
+              properties:
+                kind: { type: string, enum: [email, other] }
+                value: { type: string, maxLength: 254 }
+                consent:
+                  type: object
+                  required: [version]
+                  properties:
+                    version: { type: string, description: "contact_consent.version, as shown." }
+                    app_version: { type: string, maxLength: 40 }
+      responses:
+        "200": { description: Given, content: { application/json: { schema: { $ref: "#/components/schemas/ContactState" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: withdrawContact
+      summary: Withdraw the contact (deleted at once; its consent's record kept, ended, until the identity goes)
+      responses:
+        "200": { description: Gone, content: { application/json: { schema: { $ref: "#/components/schemas/ContactState" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/me/transfer:
+    post:
+      operationId: newTransfer
+      summary: A code to type on another device within 10 minutes
+      responses:
+        "201": { description: The code, content: { application/json: { schema: { $ref: "#/components/schemas/Transfer" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets:
+    post:
+      operationId: report
+      summary: Send a report
+      description: JSON, or multipart/form-data with files (the product's attachments limits and types).
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: "#/components/schemas/Report" } }
+          multipart/form-data:
+            schema:
+              type: object
+              required: [report]
+              properties:
+                report: { $ref: "#/components/schemas/Report" }
+                attachment: { type: array, items: { type: string, format: binary }, description: "Each file a part of its own, with its filename. Images lose their metadata (EXIF, GPS, text) here." }
+            encoding:
+              report: { contentType: application/json }
+      responses:
+        "201": { description: The ticket, content: { application/json: { schema: { $ref: "#/components/schemas/Ticket" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: tickets
+      summary: The user's tickets, newest first (50), without their threads
+      responses:
+        "200": { description: The list, content: { application/json: { schema: { type: object, required: [tickets], properties: { tickets: { type: array, items: { $ref: "#/components/schemas/Ticket" } } } } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer, format: int64 } }]
+    get:
+      operationId: ticket
+      summary: One ticket, with its thread
+      responses:
+        "200": { description: The ticket, content: { application/json: { schema: { $ref: "#/components/schemas/Ticket" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/comments:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer, format: int64 } }]
+    post:
+      operationId: reply
+      summary: Reply (a ticket waiting on the user, or resolved, opens again; a closed one is 409)
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: "#/components/schemas/Reply" } }
+          multipart/form-data:
+            schema:
+              type: object
+              required: [report]
+              properties:
+                report: { $ref: "#/components/schemas/Reply" }
+                attachment: { type: array, items: { type: string, format: binary }, description: "Each file a part of its own, with its filename. Images lose their metadata (EXIF, GPS, text) here." }
+            encoding:
+              report: { contentType: application/json }
+      responses:
+        "201": { description: The ticket, content: { application/json: { schema: { $ref: "#/components/schemas/Ticket" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/live:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer, format: int64 } }]
+    post:
+      operationId: requestLive
+      summary: Ask to talk about the ticket live
+      description: |
+        If someone at the desk is taking live conversations, the ticket goes live at once (`mode` live);
+        otherwise it's marked (`live_requested_at`) and goes live when support takes it. 403 when the
+        product doesn't let users ask (`live.user_may_ask`).
+      responses:
+        "200": { description: The ticket, content: { application/json: { schema: { $ref: "#/components/schemas/Ticket" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/typing:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer, format: int64 } }]
+    post:
+      operationId: typing
+      summary: The user is typing (a live ticket's; at most one every 2 s is passed on)
+      responses:
+        "204": { description: Noted }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/read:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer, format: int64 } }]
+    post:
+      operationId: markRead
+      summary: The user has read the thread up to now (support sees it)
+      responses:
+        "204": { description: Noted }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/attachments/{aid}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      - { name: aid, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      operationId: attachment
+      summary: One of the user's own attachments, as kept
+      responses:
+        "200": { description: The file, content: { "*/*": { schema: { type: string, format: binary } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/remote:
+    get:
+      operationId: remoteRequests
+      summary: The user's remote assistance requests still going, across their tickets
+      description: |
+        What a device's agent watches (with the `remote` events): support asked to open a shell (SSH) or see
+        the screen (VNC) on this device. Nothing connects until the device accepts. `offered`: the product
+        offers remote assistance at all on this deployment.
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { type: object, required: [remote, offered], properties: { remote: { type: array, items: { $ref: "#/components/schemas/RemoteRequest" } }, offered: { type: boolean } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/remote:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer, format: int64 } }]
+    get:
+      operationId: ticketRemote
+      summary: A ticket's remote assistance requests, all of them, newest first
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { type: object, required: [remote, offered], properties: { remote: { type: array, items: { $ref: "#/components/schemas/RemoteRequest" } }, offered: { type: boolean } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/tickets/{id}/remote/{rid}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      - { name: rid, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: answerRemote
+      summary: The device's answer to a request
+      description: |
+        Yes: the relay's session is made and `relay` is this device's side of it: dial `url` (a WebSocket)
+        with `token` as the bearer and connect it to what the channel is on this device (the device's own
+        setting: 127.0.0.1:22 for shell, :5900 for screen), never anything support names. The session is
+        single attach: when either side leaves it's over. Asking yes again before anyone's on it gives the
+        same again. 409: it's not waiting for an answer any more.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [accept], properties: { accept: { type: boolean } } } } }
+      responses:
+        "200":
+          description: The request, as it is now (with `relay` when accepted)
+          content: { application/json: { schema: { $ref: "#/components/schemas/RemoteRequest" } } }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: endRemote
+      summary: The device ends the session (or takes its yes back)
+      responses:
+        "200": { description: Ended }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/updates:
+    get:
+      operationId: updates
+      summary: The tickets support answered or changed since a time (polling)
+      description: |
+        `now` is the time to ask from next, by the service's clock and a moment early, so an update can
+        come twice (by poll and stream, or two polls): drop what's been seen, by ticket and `at`.
+      parameters: [{ name: since, in: query, schema: { type: string, format: date-time }, description: "The last answer's `now`; none: everything support ever touched." }]
+      responses:
+        "200":
+          description: Updates, and the time to ask from next
+          content:
+            application/json:
+              schema: { type: object, required: [updates, now], properties: { updates: { type: array, items: { $ref: "#/components/schemas/Update" } }, now: { type: string, format: date-time } } }
+        default: { $ref: "#/components/responses/Error" }
+  /api/v1/events:
+    get:
+      operationId: events
+      summary: The same, pushed (Server-Sent Events) while open
+      description: |
+        An Update as `data`, its kind the `event`: `answer`; on a live ticket also `mode` (it went live or
+        back), `typing` (support is typing) and `read` (support read up to `at`); `remote` when a remote
+        assistance request is asked or changes. A comment line every 25 s.
+        At most 3 streams per user.
+        A client that can't send headers on a stream (a browser's EventSource) polls /api/v1/updates instead.
+      responses:
+        "200": { description: The stream, content: { text/event-stream: { schema: { type: string } } } }
+        default: { $ref: "#/components/responses/Error" }
+
+webhooks:
+  ticket.created:
+    post:
+      summary: A user reported a problem.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.replied:
+    post:
+      summary: A user replied on a ticket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.answered:
+    post:
+      summary: Support answered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.status_changed:
+    post:
+      summary: Support changed the status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.deleted:
+    post:
+      summary: Support deleted a ticket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.live_started:
+    post:
+      summary: A ticket became a live conversation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.live_ended:
+    post:
+      summary: A live ticket went back to an ordinary one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  webhook.test:
+    post:
+      summary: Sent by hand from the panel, to every endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
