@@ -30,6 +30,8 @@ jobs:
           PRERELEASE: ${{ github.event.release.prerelease || false }}
         run: |
           npm install -g npm@^11.5.1
+          # already there (a re-run): nothing to do
+          if [ -n "$(npm view "alias-support@$TAG" version 2>/dev/null)" ]; then echo "alias-support $TAG is already on npm"; exit 0; fi
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'alias-support-*.tgz'
           dist=latest; case "$TAG" in *-*) dist=next;; esac
           [ "$PRERELEASE" = true ] && dist=next
