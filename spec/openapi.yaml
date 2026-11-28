@@ -203,6 +203,7 @@ components:
         context: { type: object, additionalProperties: true, description: "The product's fields (GET /api/v1/product)." }
         app_version: { type: string, maxLength: 40 }
         telemetry: { type: object, additionalProperties: true, description: "Free JSON up to the product's size, matching its schema if it has one (else 400, saying where)." }
+        labels: { type: array, items: { type: string }, description: "Label ids of the product's to put on the ticket (a feedback button's \"feedback\"): one the product hasn't is dropped. Support's from then on: they aren't in the user's views of the ticket." }
     Reply:
       type: object
       required: [body]
@@ -280,7 +281,7 @@ components:
       properties:
         type:
           type: string
-          enum: [ticket.created, ticket.replied, ticket.answered, ticket.status_changed, ticket.deleted, ticket.live_started, ticket.live_ended, webhook.test]
+          enum: [ticket.created, ticket.replied, ticket.answered, ticket.status_changed, ticket.labels_changed, ticket.deleted, ticket.live_started, ticket.live_ended, webhook.test]
         timestamp: { type: string, format: date-time }
         data:
           type: object
@@ -293,9 +294,10 @@ components:
             by: { type: string, description: "webhook.test only: who sent it" }
     WebhookTicket:
       type: object
-      required: [id, status, mode, created_at, updated_at]
+      required: [id, status, mode, labels, created_at, updated_at]
       properties:
         id: { type: integer, format: int64 }
+        labels: { type: array, items: { type: string }, description: "The ids of the product's labels on it ([] for none)." }
         status: { type: string, enum: [open, in_progress, waiting, resolved, closed] }
         mode: { type: string, enum: [tickets, live] }
         app_version: { type: string }
@@ -671,6 +673,18 @@ webhooks:
   ticket.status_changed:
     post:
       summary: Support changed the status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEvent' }
+      responses:
+        "2XX": { description: Delivered. }
+        "410": { description: The endpoint is turned off. }
+        default: { description: Retried later. }
+  ticket.labels_changed:
+    post:
+      summary: Support changed the labels (the ticket's labels are its new set).
       requestBody:
         required: true
         content:
